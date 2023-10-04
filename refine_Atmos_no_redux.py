@@ -56,29 +56,9 @@ def run():
     # we haven't created any new variable yet
     new_vars_output = False
 
-    # --- surface albedo
-    albedo_input_vars = set([args.shortwave_down, args.shortwave_up])
-
-    if albedo_input_vars.issubset(set(ds.variables)):
-        if verbose:
-            print(f"{pro}: compute surface albedo")
-
-        new_vars_output = True
-        refined[albedo_shortname] = compute_albedo(
-            ds, swdown=args.shortwave_down, swup=args.shortwave_up
-        )
-    else:
-        if verbose:
-            print(f"{pro}: surface albedo NOT computed, missing input variables")
-
     # --- mask variables with surface pressure
     refined, new_vars_output, pressure_vars = mask_above_surface_pressure(
         ds, refined, new_vars_output, surf_pres_short=surf_pres_short, verbose=verbose
-    )
-
-    # --- compute additional tracers from those present in dataset
-    refined, new_vars_output = refine_tracers(
-        ds, refined, new_vars_output, verbose=False
     )
 
     # --- write dataset to file
