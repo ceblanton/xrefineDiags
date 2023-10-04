@@ -119,9 +119,8 @@ def mask_above_surface_pressure(
             # but do not process the coordinate itself
             if (plev is not None) and (var != plev.name):
                 pressure_vars.append(plev.name)
-                varout = var.replace("_unmsk", "")
                 new_vars_output = True
-                refined[varout] = mask_field_above_surface_pressure(
+                refined[var] = mask_field_above_surface_pressure(
                     ds, var, plev, surf_press_short=surf_pres_short
                 )
                 refined[plev.name].attrs = ds[plev.name].attrs.copy()
