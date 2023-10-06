@@ -11,115 +11,73 @@ import os
 import netCDF4 as nc
 import xarray as xr
 
-
-CMOR_MISSING_VALUE = 1.0e20
-extra_time_variables = ["time_bnds", "average_T1", "average_T2", "average_DT"]
-do_not_encode_vars = ["nv", "grid_xt", "grid_yt", "time", "lev"]
-grid_vars = ["grid_xt", "grid_yt", "ap", "b", "ap_bnds", "b_bnds", "lev", "lev_bnds"]
-unaccepted_variables_for_masking = ["cll", "clm", "clh"]
-surf_pres_short = "ps"
-pkgname = "xrefineDiags"
-scriptname = "refine_Atmos_no_redux.py"
-pro = f"{pkgname}/{scriptname}"
-
-
 def run():
-    """run the refineDiags"""
-
-    # --- parse command line arguemnts
     args = parse_args()
-    verbose = args.verbose
 
-    # --- open file
-    if verbose:
-        print(f"{pro}: Opening input file {args.infile}")
-
-    ds = xr.open_dataset(args.infile, decode_cf=False)
-
-    # --- create output dataset
+    # Error if outfile exists
     if os.path.exists(args.outfile):
-        if verbose:
-            print(f"{pro}: Opening existing file {args.outfile}")
+        raise Exception(f"ERROR: Output file '{args.outfile}' already exists")
 
-        refined = xr.open_dataset(args.outfile, decode_cf=False)
-        refined.load()
+    ds_in = xr.open_dataset(args.infile)
+
+    # Exit with message if "ps" not available
+    if "ps" not in list(ds_in.variables):
+        print(f"WARNING: Input file '{args.infile}' does not contain surface pressure, so exiting")
+        return None
+
+    # The trigger for atmos masking is a variable attribute "needs_atmos_masking = True".
+    # In the future this will be set within the model, but for now and testing,
+    # we'll add the attribute for variables that end with "_unmsk".
+    # At the same time, strip the "_unmsk" from the variable name.
+    ds_in = preprocess(ds_in)
+
+    ds_out = xr.Dataset()
+
+    # Process all variables with attribute "needs_atmos_masking = True"
+    for var in list(ds_in.variables):
+        if 'needs_atmos_masking' in ds_in[var].attrs:
+            del ds_in[var].attrs['needs_atmos_masking']
+            ds_out[var] = mask_field_above_surface_pressure(ds_in, var)
+        else:
+            continue
+
+    # Write the output file if anything was done
+    if ds_out.variables:
+        print(f"Modifying variables '{list(ds_out.variables)}', appending into new file '{args.outfile}'")
+        write_dataset(ds_out, ds_in, args.outfile)
     else:
-        if verbose:
-            print(f"{pro}: Creating new dataset")
-
-        refined = xr.Dataset()
-
-    # we haven't created any new variable yet
-    new_vars_output = False
-
-    # --- mask variables with surface pressure
-    refined, new_vars_output, pressure_vars = mask_above_surface_pressure(
-        ds, refined, new_vars_output, surf_pres_short=surf_pres_short, verbose=verbose
-    )
-
-    # --- write dataset to file
-    if verbose and new_vars_output:
-        print(
-            f"{pro}: writting variables {list(refined.variables)} into refined file {args.outfile} "
-        )
-    elif verbose and not new_vars_output:
-        print(f"{pro}: no variables created, not writting refined file")
-
-    if new_vars_output:
-        write_dataset(refined, ds, pressure_vars, args)
-
+        print(f"No variables modified, so not writing output file '{args.outfile}'")
     return None
 
 
-def mask_above_surface_pressure(
-    ds, refined, new_vars_output, surf_pres_short="ps", verbose=False
-):
-    """find fields with pressure coordinate and mask
-    values of fields where p > surface pressure
+def preprocess(ds):
+    """add needs_atmos_masking attribute if var ends with _unmsk"""
 
-    Args:
-        ds (_type_): _description_
-        out (_type_): _description_
-        verbose (bool, optional): _description_. Defaults to False.
-    """
+    for var in list(ds.variables):
+        if var.endswith('_unmsk'):
+            ds[var].attrs['needs_atmos_masking'] = True
+            newvar = var.replace("_unmsk", "")
+            ds = ds.rename_vars({var: newvar})
 
-    pressure_vars = []
-
-    # surface pressure needs to be in the dataset
-    if surf_pres_short in list(ds.variables):
-        vars_to_process = list(ds.variables)
-        # do not process surface pressure
-        vars_to_process.remove(surf_pres_short)
-        for var in vars_to_process:
-            # find the pressure coordinate in dataset
-            plev = pressure_coordinate(ds, var, verbose=verbose)
-            # proceed if there is a coordinate pressure
-            # but do not process the coordinate itself
-            if (plev is not None) and (var != plev.name):
-                pressure_vars.append(plev.name)
-                new_vars_output = True
-                refined[var] = mask_field_above_surface_pressure(
-                    ds, var, plev, surf_press_short=surf_pres_short
-                )
-                refined[plev.name].attrs = ds[plev.name].attrs.copy()
-
-    pressure_vars = list(set(pressure_vars))
-
-    return refined, new_vars_output, pressure_vars
+    return ds
 
 
-def mask_field_above_surface_pressure(ds, var, pressure_dim, surf_press_short="ps"):
+def mask_field_above_surface_pressure(ds, var):
     """mask data with pressure larger than surface pressure"""
+
+    plev = pressure_coordinate(ds, var)
 
     # broadcast pressure coordinate and surface pressure to
     # the dimensions of the variable to mask
-    plev_extended, _ = xr.broadcast(pressure_dim, ds[var])
-    ps_extended, _ = xr.broadcast(ds[surf_press_short], ds[var])
+    plev_extended, _ = xr.broadcast(plev, ds[var])
+    ps_extended, _ = xr.broadcast(ds["ps"], ds[var])
     # masking do not need looping
-    masked = xr.where(plev_extended > ps_extended, CMOR_MISSING_VALUE, ds[var])
+    masked = xr.where(plev_extended > ps_extended, 1.0e20, ds[var])
     # copy attributes and transpose dims like the original array
     masked.attrs = ds[var].attrs.copy()
     masked = masked.transpose(*ds[var].dims)
+
+    print(f"Processed {var}")
 
     return masked
 
@@ -137,52 +95,25 @@ def pressure_coordinate(ds, varname, verbose=False):
             elif ("coordinates" in ds.attrs) and (ds[dim].attrs["units"] == "Pa"):
                 pressure_coord = ds[dim]
 
-    # some variables need not to be masked
-    if varname in unaccepted_variables_for_masking:
-        pressure_coord = None
-
-    if verbose:
-        if pressure_coord is not None:
-            print(f"{pro}: {varname} has pressure coords {pressure_coord.name}")
-        else:
-            print(f"{pro}: {varname} has no pressure coords")
-
     return pressure_coord
 
 
-def write_dataset(ds, template, pressure_vars, args):
+def write_dataset(ds, template, outfile):
     """prepare the dataset and dump into netcdf file"""
 
-    if len(ds.attrs) == 0:
-        ds.attrs = template.attrs.copy()  # copy global attributes
-    ds.attrs["filename"] = args.outfile
+    # copy global attributes
+    ds.attrs = template.attrs.copy()
 
-    # --- add proper grid attrs
-    for var in grid_vars:
-        if var in list(template.variables):
+    # copy all variables and their attributes
+    # except those already processed
+    for var in list(template.variables):
+        if var in list(ds.variables):
+            continue
+        else:
             ds[var] = template[var]
             ds[var].attrs = template[var].attrs.copy()
 
-    # --- add extra time variables
-    for var in extra_time_variables:
-        if var in list(template.variables):
-            ds[var] = template[var]
-            ds[var].attrs = template[var].attrs.copy()
-
-    # --- remove bounds in attributes since it messed the bnds var
-    var_with_bounds = []
-    bounds_variables = []
-    for var in list(ds.variables):
-        if "bounds" in ds[var].attrs:
-            var_with_bounds.append(var)
-            bounds_variables.append(ds[var].attrs.pop("bounds"))
-
-    encoding = set_netcdf_encoding(ds, pressure_vars)
-
-    ds.to_netcdf(
-        args.outfile, format=args.format, encoding=encoding, unlimited_dims="time"
-    )
-    post_write(args.outfile, ds, var_with_bounds, bounds_variables)
+    ds.to_netcdf(outfile, unlimited_dims="time")
 
     return None
 
@@ -229,7 +160,6 @@ def parse_args():
         required=False,
         help="Print detailed output",
     )
-    parser.add_argument("-t", "--tagfile", action="store_true", required=False, help="")
     parser.add_argument(
         "-f",
         "--format",
