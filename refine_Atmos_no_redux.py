@@ -18,17 +18,20 @@ def run():
     if os.path.exists(args.outfile):
         raise Exception(f"ERROR: Output file '{args.outfile}' already exists")
 
-    ds_in = xr.open_dataset(args.infile)
+    # Open ps dataset
+    ds_ps = xr.open_dataset(args.ps)
 
     # Exit with message if "ps" not available
-    if "ps" not in list(ds_in.variables):
-        print(f"WARNING: Input file '{args.infile}' does not contain surface pressure, so exiting")
+    if "ps" not in list(ds_ps.variables):
+        print(f"WARNING: File '{args.infile}' does not contain surface pressure, so exiting")
         return None
+
+    # Open input dataset
+    ds_in = xr.open_dataset(args.infile)
 
     # The trigger for atmos masking is a variable attribute "needs_atmos_masking = True".
     # In the future this will be set within the model, but for now and testing,
     # we'll add the attribute for variables that end with "_unmsk".
-    # At the same time, strip the "_unmsk" from the variable name.
     ds_in = preprocess(ds_in)
 
     ds_out = xr.Dataset()
@@ -37,7 +40,7 @@ def run():
     for var in list(ds_in.variables):
         if 'needs_atmos_masking' in ds_in[var].attrs:
             del ds_in[var].attrs['needs_atmos_masking']
-            ds_out[var] = mask_field_above_surface_pressure(ds_in, var)
+            ds_out[var] = mask_field_above_surface_pressure(ds_in, var, ds_ps)
         else:
             continue
 
@@ -56,13 +59,11 @@ def preprocess(ds):
     for var in list(ds.variables):
         if var.endswith('_unmsk'):
             ds[var].attrs['needs_atmos_masking'] = True
-            newvar = var.replace("_unmsk", "")
-            ds = ds.rename_vars({var: newvar})
 
     return ds
 
 
-def mask_field_above_surface_pressure(ds, var):
+def mask_field_above_surface_pressure(ds, var, ds_ps):
     """mask data with pressure larger than surface pressure"""
 
     plev = pressure_coordinate(ds, var)
@@ -70,7 +71,7 @@ def mask_field_above_surface_pressure(ds, var):
     # broadcast pressure coordinate and surface pressure to
     # the dimensions of the variable to mask
     plev_extended, _ = xr.broadcast(plev, ds[var])
-    ps_extended, _ = xr.broadcast(ds["ps"], ds[var])
+    ps_extended, _ = xr.broadcast(ds_ps["ps"], ds[var])
     # masking do not need looping
     masked = xr.where(plev_extended > ps_extended, 1.0e20, ds[var])
     # copy attributes and transpose dims like the original array
@@ -167,6 +168,13 @@ def parse_args():
         required=False,
         default="NETCDF3_64BIT",
         help="netcdf format for output file",
+    )
+    parser.add_argument(
+        "-p",
+        "--ps",
+        type=str,
+        required=True,
+        help="NetCDF file containing surface pressure"
     )
     return parser.parse_args()
 
